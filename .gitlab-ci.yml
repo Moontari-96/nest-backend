@@ -1,0 +1,75 @@
+# GitLab CI 파이프라인에서 실행될 단계 순서를 정의
+stages:
+    - version-update # package.json 버전 업데이트
+    - build # NestJS 애플리케이션 빌드
+    - docker-build # Docker 이미지 빌드
+    - docker-push # 이미지 GitLab 레지스트리에 업로드
+    - deploy # 원격 서버에 배포
+
+# 공통으로 사용할 변수 정의
+variables:
+    DOCKER_IMAGE: registry.gitlab.com/<your-username>/<your-project-name>
+    DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+    CONTAINER_NAME: nest-app
+
+# 1단계: 버전 자동 증가 (선택사항, package.json 버전만 업데이트)
+version-update:
+    stage: version-update
+    image: node:18
+    script:
+        - npm version patch --no-git-tag-version # Git 태그는 생성하지 않음
+        - echo "Version updated"
+
+# 2단계: NestJS 애플리케이션 빌드
+build:
+    stage: build
+    image: node:18
+    script:
+        - npm install # 의존성 설치
+        - npm run build # NestJS 빌드 (dist 디렉토리 생성)
+    artifacts:
+        paths:
+            - dist/ # 다음 단계에서 사용할 dist 결과물을 보존
+
+# 3단계: Docker 이미지 빌드
+docker-build:
+    stage: docker-build
+    image: docker:latest
+    services:
+        - docker:dind # Docker-in-Docker 활성화
+    script:
+        - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+        - docker build -t $DOCKER_IMAGE:$DOCKER_TAG . # 이미지에 커밋 해시 태그 붙이기
+    artifacts:
+        name: '$DOCKER_TAG'
+        paths:
+            - Dockerfile
+
+# 4단계: Docker 이미지 GitLab Container Registry에 push
+docker-push:
+    stage: docker-push
+    image: docker:latest
+    services:
+        - docker:dind
+    script:
+        - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+        - docker push $DOCKER_IMAGE:$DOCKER_TAG # 태그된 이미지 업로드
+
+# 5단계: 원격 서버에 SSH로 접속하여 배포
+deploy:
+    stage: deploy
+    only:
+        - main # main 브랜치에 푸시될 때만 배포 실행
+    image: alpine:latest
+    before_script:
+        - apk add --no-cache openssh # SSH 클라이언트 설치
+    script:
+        - echo "$SSH_PRIVATE_KEY" > id_rsa # SSH 개인 키 파일 생성
+        - chmod 600 id_rsa # 개인 키 권한 설정
+        - ssh -o StrictHostKeyChecking=no -i id_rsa user@your.server.ip "
+          docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+          docker pull $DOCKER_IMAGE:$DOCKER_TAG &&
+          docker stop $CONTAINER_NAME || true &&
+          docker rm $CONTAINER_NAME || true &&
+          docker run -d --name $CONTAINER_NAME -p 3000:3000 $DOCKER_IMAGE:$DOCKER_TAG
+          "
